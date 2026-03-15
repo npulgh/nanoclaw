@@ -3,34 +3,35 @@
 
 FROM node:22-slim
 
-# Use Tsinghua mirror for faster downloads in China
-RUN sed -i 's|http://deb.debian.org|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+# Optional: override apt mirror for faster downloads in restricted networks
+# Usage: docker build --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn ...
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+      sed -i "s|http://deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi
 
-# Install system dependencies for Chromium (retry up to 3 times for flaky networks)
-RUN apt-get update && \
-    for attempt in 1 2 3; do \
-      apt-get install -y --fix-missing \
-        chromium \
-        fonts-liberation \
-        fonts-noto-cjk \
-        fonts-noto-color-emoji \
-        libgbm1 \
-        libnss3 \
-        libatk-bridge2.0-0 \
-        libgtk-3-0 \
-        libx11-xcb1 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxrandr2 \
-        libasound2 \
-        libpangocairo-1.0-0 \
-        libcups2 \
-        libdrm2 \
-        libxshmfence1 \
-        curl \
-        git \
-      && break || echo "Attempt $attempt failed, retrying..." && sleep 3; \
-    done && rm -rf /var/lib/apt/lists/*
+# Install system dependencies for Chromium
+RUN apt-get update && apt-get install -y \
+    chromium \
+    fonts-liberation \
+    fonts-noto-cjk \
+    fonts-noto-color-emoji \
+    libgbm1 \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxshmfence1 \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium

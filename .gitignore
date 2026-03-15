@@ -35,7 +35,4 @@ groups/global/*
 # Skills system (local per-installation state)
 .nanoclaw/
 
-# Personal notes (not for upstream)
-notes/
-
 agents-sdk-docs
