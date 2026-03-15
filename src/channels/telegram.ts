@@ -1,4 +1,4 @@
-import https from 'https';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
@@ -54,9 +54,26 @@ export class TelegramChannel implements Channel {
   }
 
   async connect(): Promise<void> {
+    const envVars = readEnvFile(['TELEGRAM_PROXY']);
+    const proxyUrl =
+      process.env.TELEGRAM_PROXY ||
+      envVars.TELEGRAM_PROXY ||
+      process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      '';
+
+    // Build baseFetchConfig — add proxy agent if configured.
+    // grammy uses node-fetch internally, which needs an `agent` option
+    // (globalThis.fetch overrides don't affect node-fetch).
+    const baseFetchConfig: Record<string, unknown> = { compress: true };
+    if (proxyUrl) {
+      baseFetchConfig.agent = new HttpsProxyAgent(proxyUrl);
+      logger.info({ proxyUrl }, 'Telegram: using proxy');
+    }
+
     this.bot = new Bot(this.botToken, {
       client: {
-        baseFetchConfig: { agent: https.globalAgent, compress: true },
+        baseFetchConfig,
       },
     });
 
@@ -214,7 +231,7 @@ export class TelegramChannel implements Channel {
     });
 
     // Start polling — returns a Promise that resolves when started
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       this.bot!.start({
         onStart: (botInfo) => {
           logger.info(
@@ -227,6 +244,9 @@ export class TelegramChannel implements Channel {
           );
           resolve();
         },
+      }).catch((err) => {
+        logger.error({ err }, 'Telegram bot failed to start');
+        reject(err);
       });
     });
   }
