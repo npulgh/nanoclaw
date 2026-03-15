@@ -7,7 +7,7 @@ Add Feishu (飞书) as a messaging channel to NanoClaw, parallel to Telegram, Sl
 - **Approach**: Built-in channel (方案 A). Same pattern as Telegram/Slack/Discord — single file in `src/channels/`, self-registration via factory.
 - **Connection**: WebSocket long connection via SDK's `WSClient`. No public URL required.
 - **Domain**: Domestic Feishu (`Lark.Domain.Feishu`).
-- **Outbound format**: Plain text (`msg_type: 'text'`).
+- **Outbound format**: Plain text (`msg_type: 'text'`). Future enhancement: upgrade to `post` rich text for markdown/links support.
 - **Scope**: Group chat + private chat + non-text message placeholders.
 
 ## File Changes
@@ -44,13 +44,33 @@ FEISHU_APP_ID=cli_xxxxxxxxxxxx
 FEISHU_APP_SECRET=your_app_secret
 ```
 
-The SDK automatically manages `tenant_access_token` acquisition and refresh.
+The SDK automatically manages `tenant_access_token` acquisition and refresh. The factory also reads from `.env` file via `readEnvFile()` as fallback (consistent with Telegram).
+
+## Factory Registration
+
+```typescript
+registerChannel('feishu', (opts: ChannelOpts) => {
+  const envVars = readEnvFile(['FEISHU_APP_ID', 'FEISHU_APP_SECRET']);
+  const appId = process.env.FEISHU_APP_ID || envVars.FEISHU_APP_ID || '';
+  const appSecret = process.env.FEISHU_APP_SECRET || envVars.FEISHU_APP_SECRET || '';
+  if (!appId || !appSecret) {
+    logger.warn('Feishu: FEISHU_APP_ID or FEISHU_APP_SECRET not set');
+    return null;
+  }
+  return new FeishuChannel(appId, appSecret, opts);
+});
+```
 
 ## Class Interface
 
 ```typescript
 export class FeishuChannel implements Channel {
   name = 'feishu';
+  private client: Lark.Client;        // For API calls (send messages, user lookup)
+  private wsClient: Lark.WSClient;    // For receiving events (separate object)
+  private connected = false;
+  private botOpenId: string = '';      // Resolved during connect()
+  private userNameCache = new Map<string, string>();
 
   constructor(appId: string, appSecret: string, opts: ChannelOpts);
 
@@ -60,8 +80,11 @@ export class FeishuChannel implements Channel {
   ownsJid(jid: string): boolean;
   async disconnect(): Promise<void>;
   async setTyping?(jid: string, isTyping: boolean): Promise<void>; // noop
+  // syncGroups intentionally omitted — Feishu has no equivalent bulk sync API
 }
 ```
+
+Note: `Lark.Client` and `Lark.WSClient` are two separate SDK objects. `Client` handles API calls (sending messages, querying users). `WSClient` handles the WebSocket event subscription. Both require `appId`/`appSecret` independently.
 
 ## Inbound Message Flow
 
@@ -78,11 +101,20 @@ Extract fields:
   - messageType = data.message.message_type → "text" | "image" | ...
   - content = JSON.parse(data.message.content)
   - senderId = data.sender.sender_id.open_id
+  - senderType = data.sender.sender_type    → "user" | "bot" | ...
   - mentions = data.message.mentions || []
     ↓
 Build JID: feishu:{chatId}
     ↓
+Emit chat metadata (ALWAYS, even for unregistered chats):
+  opts.onChatMetadata(chatJid, timestamp, chatName, 'feishu', chatType === 'group')
+  This enables chat discovery — unregistered chats appear in admin UI.
+    ↓
 Security filter: only registered groups pass through
+  (unregistered chats: emit metadata above, then return early)
+    ↓
+Filter bot messages:
+  if senderType !== 'user', set is_bot_message = true
     ↓
 Build NewMessage:
   {
@@ -90,10 +122,9 @@ Build NewMessage:
     chat_jid: "feishu:{chatId}",
     sender: senderId,
     sender_name: resolved via API (cached),
-    content: parsed text,
-    timestamp: ISO from create_time,
-    is_from_me: false,
-    is_bot_message: false
+    content: parsed text (with @mention replacement),
+    timestamp: new Date(parseInt(data.message.create_time)).toISOString(),
+    is_from_me: senderId === this.botOpenId
   }
     ↓
 opts.onMessage(chatJid, message)
@@ -101,22 +132,31 @@ opts.onMessage(chatJid, message)
 SQLite → message loop → agent invocation
 ```
 
+Key details:
+
+- `create_time` is **milliseconds** (string). Convert via `new Date(parseInt(create_time)).toISOString()`.
+- `onChatMetadata` is called for ALL incoming messages (registered and unregistered) to enable chat discovery.
+- Bot messages (`sender_type !== 'user'`) are tagged so the router can filter them from agent input.
+
 ## @Mention Handling
 
 Feishu uses placeholder keys in message text (`@_user_1`) with a `mentions` array mapping keys to user IDs.
 
-1. Check if `mentions` contains the bot's own `open_id`.
-2. If yes, replace the placeholder with `@{ASSISTANT_NAME}` (e.g., `@Andy`) so the trigger pattern matches.
-3. Private chat (`chat_type === "p2p"`) triggers without @mention.
+1. During `connect()`, fetch the bot's own `open_id` via `client.bot.v3.botInfo.get()` and cache it as `this.botOpenId`.
+2. On incoming message, check if `mentions` contains an entry where `id.open_id === this.botOpenId`.
+3. If yes, replace that placeholder (e.g., `@_user_1`) with `@{ASSISTANT_NAME}` (e.g., `@Andy`) so the trigger pattern matches.
+4. For private chat (`chat_type === "p2p"`): prepend `@{ASSISTANT_NAME}` to the message content so the trigger pattern matches without explicit @mention. This is consistent with how Telegram handles DMs.
 
 ## Outbound Message Flow
 
 ```typescript
 async sendMessage(jid: string, text: string): Promise<void> {
   const chatId = jid.replace(/^feishu:/, '');
-  const chunks = splitMessage(text, 4000);
 
-  for (const chunk of chunks) {
+  // Feishu text messages support up to ~30KB content.
+  // Split at 4096 chars for UX consistency with Telegram.
+  for (let i = 0; i < text.length; i += 4096) {
+    const chunk = text.slice(i, i + 4096);
     await this.client.im.v1.message.create({
       params: { receive_id_type: 'chat_id' },
       data: {
@@ -129,7 +169,7 @@ async sendMessage(jid: string, text: string): Promise<void> {
 }
 ```
 
-Split at 4000 characters per chunk (consistent with Telegram strategy).
+Uses inline slicing (same approach as Telegram), not a separate `splitMessage` utility.
 
 ## Non-Text Message Placeholders
 
@@ -140,29 +180,65 @@ Split at 4000 characters per chunk (consistent with Telegram strategy).
 | `audio` | `[Audio]` |
 | `media` | `[Video]` |
 | `sticker` | `[Sticker]` |
-| `post` | Extract plain text (iterate content arrays, concatenate text segments) |
+| `post` | Extract plain text (see below) |
 | other | `[Unsupported: {type}]` |
+
+### Post (rich text) extraction
+
+Feishu `post` content structure:
+
+```json
+{
+  "zh_cn": {
+    "title": "Title",
+    "content": [
+      [{"tag": "text", "text": "Hello "}, {"tag": "a", "text": "link", "href": "..."}],
+      [{"tag": "at", "user_id": "ou_xxx"}, {"tag": "text", "text": " world"}]
+    ]
+  }
+}
+```
+
+Extraction logic:
+
+1. Get the first available locale key (try `zh_cn`, then first key).
+2. If `title` exists, prepend it.
+3. Iterate `content` (array of arrays). For each segment:
+   - `tag === "text"` or `tag === "a"`: append `.text`
+   - `tag === "at"`: append `@{user_id}`
+   - Other tags: skip
+4. Join lines with `\n`.
 
 ## sender_name Resolution
 
 The `im.message.receive_v1` event does not include the sender's display name.
 
-1. **Primary**: Call `client.contact.v3.user.get()` with the sender's `open_id`.
+1. **Primary**: Call `client.contact.v3.user.get({ path: { user_id: open_id }, params: { user_id_type: 'open_id' } })` and extract `.data.user.name`.
 2. **Cache**: In-memory `Map<string, string>` mapping `open_id → name`. Avoids repeated API calls.
 3. **Fallback**: On API failure, use `open_id` as the sender_name.
+4. **Permission**: Requires `contact:user.base:readonly` scope (add to setup instructions).
+
+## Bot Identity
+
+During `connect()`, call `client.bot.v3.botInfo.get()` to obtain the bot's `open_id`. Cache as `this.botOpenId`. Used for:
+
+- `is_from_me` detection (filter out bot's own messages from agent input)
+- @mention detection (match bot's open_id in mentions array)
 
 ## Connection Lifecycle
 
 ### connect()
 
-1. Create `Lark.Client` with appId, appSecret, `AppType.SelfBuild`, `Domain.Feishu`.
-2. Create `EventDispatcher`, register `im.message.receive_v1` handler.
-3. Create `WSClient`, call `wsClient.start({ eventDispatcher })`.
-4. Set `connected = true`.
+1. Create `Lark.Client` with appId, appSecret, `AppType.SelfBuild`, `Domain.Feishu` — for API calls.
+2. Fetch bot identity via `client.bot.v3.botInfo.get()`, cache `botOpenId`.
+3. Create `EventDispatcher`, register `im.message.receive_v1` handler.
+4. Create `Lark.WSClient` with appId, appSecret — for event subscription (separate from Client).
+5. Call `wsClient.start({ eventDispatcher })`.
+6. Set `connected = true`.
 
 ### disconnect()
 
-Set `connected = false`. SDK's WSClient has no explicit stop method; the flag prevents event processing.
+Set `connected = false` and `wsClient = null`. SDK's WSClient has no explicit `stop()` method — this is a known SDK limitation. Setting the reference to null allows garbage collection. Process exit is the true cleanup mechanism.
 
 ### setTyping()
 
@@ -175,12 +251,14 @@ Noop. Feishu IM API does not support typing indicators.
 | WSClient connection failure | SDK built-in reconnection; log warn |
 | Send message API failure | Catch, log error, do not break message loop |
 | User name lookup failure | Fallback to open_id, log warn |
-| Unregistered group message | Silent ignore (consistent with other channels) |
-| Rate limit (429) | Log warn, no retry (avoid cascading), natural interval on next message |
+| Bot identity fetch failure | Log error, use empty string (is_from_me will never match, @mention detection degrades gracefully) |
+| Unregistered group message | Emit onChatMetadata for discovery, then silent ignore |
+| Rate limit (429) | Log warn, no retry. Feishu rate limit is ~50 msg/sec — generous for personal assistant use case |
+| Bot-originated message | Tag as is_bot_message, let router filter |
 
 ## Test Plan
 
-17 test cases in `src/channels/feishu.test.ts`, fully mocking `@larksuiteoapi/node-sdk`.
+22 test cases in `src/channels/feishu.test.ts`, fully mocking `@larksuiteoapi/node-sdk`.
 
 ### Registration (2)
 - No credentials → factory returns null
@@ -190,25 +268,38 @@ Noop. Feishu IM API does not support typing indicators.
 - `ownsJid('feishu:oc_xxx')` → true
 - `ownsJid('tg:123')` → false
 
-### Connection (1)
-- `connect()` calls `WSClient.start()`
+### Connection (3)
 
-### Inbound Messages (4)
+- `connect()` creates Client + WSClient separately, calls WSClient.start()
+- `isConnected()` returns false before connect, true after
+- `disconnect()` sets connected to false
+
+### Inbound Messages (5)
+
 - Text message → onMessage callback with correct fields
 - Image message → placeholder `[Image]`
-- Post (rich text) → extracted plain text
-- Unregistered group → silently ignored
+- Post (rich text) → extracted plain text with title
+- Unregistered group → onChatMetadata called, onMessage NOT called
+- Bot message (sender_type !== 'user') → tagged as is_bot_message
 
 ### @Mention (2)
-- Bot @mentioned → placeholder replaced with `@{ASSISTANT_NAME}`
-- Private chat → trigger prefix auto-added
+
+- Bot @mentioned in group → placeholder replaced with `@{ASSISTANT_NAME}`
+- Private chat → `@{ASSISTANT_NAME}` prepended to content
 
 ### Outbound Messages (3)
+
 - Short text → single API call
-- Long text → chunked into multiple calls
+- Long text (>4096 chars) → chunked into multiple calls
 - API failure → error logged, no throw
 
 ### sender_name (3)
-- First lookup → API called
-- Repeat lookup → cache hit, API called once
+
+- First lookup → API called, name returned
+- Repeat lookup → cache hit, API called only once
 - API failure → fallback to open_id
+
+### Chat Metadata (2)
+
+- Registered group message → onChatMetadata called with channel='feishu'
+- Unregistered group → onChatMetadata still called (enables discovery)
