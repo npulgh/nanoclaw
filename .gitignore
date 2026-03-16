@@ -35,4 +35,8 @@ groups/global/*
 # Skills system (local per-installation state)
 .nanoclaw/
 
+# Local notes & planning artifacts
+notes/
+docs/superpowers/
+
 agents-sdk-docs
