@@ -36,7 +36,48 @@ export class FeishuChannel implements Channel {
   }
 
   async connect(): Promise<void> {
-    throw new Error('Not implemented');
+    this.client = new Lark.Client({
+      appId: this.appId,
+      appSecret: this.appSecret,
+      appType: Lark.AppType.SelfBuild,
+      domain: Lark.Domain.Feishu,
+    });
+
+    // Fetch bot identity for @mention detection and is_from_me
+    try {
+      const botInfo = await (this.client as any).bot.v3.info.get();
+      this.botOpenId = botInfo?.data?.bot?.open_id || '';
+      logger.info(
+        { botOpenId: this.botOpenId },
+        'Feishu: bot identity resolved',
+      );
+    } catch (err) {
+      logger.error(
+        { err },
+        'Feishu: failed to get bot info, @mention detection may not work',
+      );
+    }
+
+    const eventDispatcher = new Lark.EventDispatcher({}).register({
+      'im.message.receive_v1': async (data: any) => {
+        if (!this.connected) return;
+        await this.handleMessage(data);
+      },
+    });
+
+    this.wsClient = new Lark.WSClient({
+      appId: this.appId,
+      appSecret: this.appSecret,
+      loggerLevel: Lark.LoggerLevel.info,
+    });
+
+    await this.wsClient.start({ eventDispatcher });
+    this.connected = true;
+    logger.info('Feishu: connected via WebSocket');
+  }
+
+  private async handleMessage(_data: any): Promise<void> {
+    // Will be implemented in Task 6
   }
 
   async sendMessage(_jid: string, _text: string): Promise<void> {
@@ -52,7 +93,10 @@ export class FeishuChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
-    throw new Error('Not implemented');
+    this.connected = false;
+    this.wsClient = null;
+    this.client = null;
+    logger.info('Feishu: disconnected');
   }
 
   async setTyping(_jid: string, _isTyping: boolean): Promise<void> {

@@ -36,26 +36,32 @@ const sdkRef = vi.hoisted(() => ({
 }));
 
 vi.mock('@larksuiteoapi/node-sdk', () => ({
-  Client: vi.fn(() => ({
-    im: {
-      v1: { message: { create: sdkRef.messageCreate } },
-    },
-    contact: {
-      v3: { user: { get: sdkRef.userGet } },
-    },
-    bot: {
-      v3: { info: { get: sdkRef.botInfoGet } },
-    },
-  })),
-  WSClient: vi.fn(() => ({
-    start: sdkRef.wsStart,
-  })),
-  EventDispatcher: vi.fn(() => ({
-    register: vi.fn(function (this: any, handlers: Record<string, Function>) {
-      sdkRef.eventHandlers = handlers;
-      return this;
-    }),
-  })),
+  Client: vi.fn(function () {
+    return {
+      im: {
+        v1: { message: { create: sdkRef.messageCreate } },
+      },
+      contact: {
+        v3: { user: { get: sdkRef.userGet } },
+      },
+      bot: {
+        v3: { info: { get: sdkRef.botInfoGet } },
+      },
+    };
+  }),
+  WSClient: vi.fn(function () {
+    return {
+      start: sdkRef.wsStart,
+    };
+  }),
+  EventDispatcher: vi.fn(function () {
+    return {
+      register: vi.fn(function (this: any, handlers: Record<string, Function>) {
+        sdkRef.eventHandlers = handlers;
+        return this;
+      }),
+    };
+  }),
   AppType: { SelfBuild: 0 },
   Domain: { Feishu: 'https://open.feishu.cn' },
   LoggerLevel: { info: 1 },
@@ -181,6 +187,31 @@ describe('FeishuChannel', () => {
     it('does not own telegram JIDs', () => {
       const channel = new FeishuChannel('id', 'secret', createTestOpts());
       expect(channel.ownsJid('tg:123456')).toBe(false);
+    });
+  });
+
+  describe('connection lifecycle', () => {
+    it('isConnected() returns false before connect', () => {
+      const channel = new FeishuChannel('id', 'secret', createTestOpts());
+      expect(channel.isConnected()).toBe(false);
+    });
+
+    it('connect() creates Client and WSClient, starts WebSocket', async () => {
+      const channel = new FeishuChannel('id', 'secret', createTestOpts());
+      await channel.connect();
+
+      expect(channel.isConnected()).toBe(true);
+      expect(sdkRef.wsStart).toHaveBeenCalled();
+      expect(sdkRef.botInfoGet).toHaveBeenCalled();
+    });
+
+    it('disconnect() sets connected to false', async () => {
+      const channel = new FeishuChannel('id', 'secret', createTestOpts());
+      await channel.connect();
+      expect(channel.isConnected()).toBe(true);
+
+      await channel.disconnect();
+      expect(channel.isConnected()).toBe(false);
     });
   });
 });
