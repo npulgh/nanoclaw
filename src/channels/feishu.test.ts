@@ -221,7 +221,9 @@ describe('FeishuChannel', () => {
       const channel = new FeishuChannel('id', 'secret', opts);
       await channel.connect();
 
-      const event = createMessageEvent({ content: JSON.stringify({ text: 'Hello world' }) });
+      const event = createMessageEvent({
+        content: JSON.stringify({ text: 'Hello world' }),
+      });
       await triggerEvent('im.message.receive_v1', event);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -292,6 +294,71 @@ describe('FeishuChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'feishu:oc_test123',
         expect.objectContaining({ timestamp: '2024-01-01T00:00:00.000Z' }),
+      );
+    });
+  });
+
+  describe('@mention handling', () => {
+    it('replaces bot mention placeholder with trigger name', async () => {
+      const opts = createTestOpts();
+      const channel = new FeishuChannel('id', 'secret', opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        content: JSON.stringify({ text: '@_user_1 hello' }),
+        mentions: [
+          {
+            key: '@_user_1',
+            id: { open_id: 'ou_bot123' },
+            name: 'TestBot',
+          },
+        ],
+      });
+      await triggerEvent('im.message.receive_v1', event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'feishu:oc_test123',
+        expect.objectContaining({
+          content: '@Andy hello',
+        }),
+      );
+    });
+
+    it('prepends trigger for private chat messages', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'feishu:oc_private001': {
+            name: 'Private',
+            folder: 'private',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new FeishuChannel('id', 'secret', opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        chatId: 'oc_private001',
+        chatType: 'p2p',
+        content: JSON.stringify({ text: 'What time is it?' }),
+      });
+      await triggerEvent('im.message.receive_v1', event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'feishu:oc_private001',
+        expect.objectContaining({
+          content: '@Andy What time is it?',
+        }),
+      );
+
+      // Verify metadata emitted with isGroup = false for p2p chat
+      expect(opts.onChatMetadata).toHaveBeenCalledWith(
+        'feishu:oc_private001',
+        expect.any(String),
+        undefined,
+        'feishu',
+        false,
       );
     });
   });

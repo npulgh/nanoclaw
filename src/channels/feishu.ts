@@ -112,6 +112,22 @@ export class FeishuChannel implements Channel {
       content = message.content || `[${messageType}]`;
     }
 
+    // @mention handling: replace bot mention placeholder with trigger name
+    const mentions = message.mentions || [];
+    if (isGroup && this.botOpenId) {
+      for (const mention of mentions) {
+        if (mention.id?.open_id === this.botOpenId) {
+          content = content.replace(mention.key, `@${ASSISTANT_NAME}`);
+          break;
+        }
+      }
+    }
+
+    // Private chat: prepend trigger so trigger pattern matches
+    if (!isGroup && !TRIGGER_PATTERN.test(content)) {
+      content = `@${ASSISTANT_NAME} ${content}`;
+    }
+
     // Resolve sender name
     const senderName = await this.resolveSenderName(senderId);
 
