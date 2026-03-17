@@ -69,14 +69,17 @@ export class FeishuChannel implements Channel {
     });
 
     // Fetch bot identity for @mention detection and is_from_me.
-    // The SDK path client.bot.v3.info.get() is auto-generated from the API spec
-    // and may not exist in all SDK versions. The try/catch ensures graceful
-    // degradation: if it fails, botOpenId stays empty and @mention detection
-    // falls back to not replacing placeholders (users can still trigger via
-    // direct @mention text). Verify against your SDK version at runtime.
+    // The SDK v1.59 does not expose a bot namespace, so we call the
+    // GET /open-apis/bot/v3/info endpoint directly using the client's
+    // domain and tenant access token.
     try {
-      const botInfo = await (this.client as any).bot.v3.info.get();
-      this.botOpenId = botInfo?.data?.bot?.open_id || '';
+      const token = await (this.client as any).tokenManager.getTenantAccessToken();
+      const domain: string = (this.client as any).domain || 'https://open.feishu.cn';
+      const res = await fetch(`${domain}/open-apis/bot/v3/info`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = (await res.json()) as any;
+      this.botOpenId = json?.bot?.open_id || '';
       logger.info(
         { botOpenId: this.botOpenId },
         'Feishu: bot identity resolved',

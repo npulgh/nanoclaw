@@ -17,7 +17,7 @@ In the app's **Permissions Management**, enable:
 | `im:message:send_as_bot` | Send messages |
 | `im:message.group_at_msg:readonly` | Receive @mentions in groups |
 | `im:message.p2p_msg:readonly` | Receive direct messages |
-| `contact:user.base:readonly` | Resolve sender display names |
+| `contact:contact.base:readonly` | Resolve sender display names |
 
 ### 3. Subscribe to Events
 

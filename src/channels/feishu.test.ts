@@ -30,7 +30,7 @@ vi.mock('../logger.js', () => ({
 const sdkRef = vi.hoisted(() => ({
   messageCreate: null as any,
   userGet: null as any,
-  botInfoGet: null as any,
+  getTenantAccessToken: null as any,
   wsStart: null as any,
   eventHandlers: null as Record<string, Function> | null,
 }));
@@ -38,14 +38,13 @@ const sdkRef = vi.hoisted(() => ({
 vi.mock('@larksuiteoapi/node-sdk', () => ({
   Client: vi.fn(function () {
     return {
+      domain: 'https://open.feishu.cn',
+      tokenManager: { getTenantAccessToken: sdkRef.getTenantAccessToken },
       im: {
         v1: { message: { create: sdkRef.messageCreate } },
       },
       contact: {
         v3: { user: { get: sdkRef.userGet } },
-      },
-      bot: {
-        v3: { info: { get: sdkRef.botInfoGet } },
       },
     };
   }),
@@ -133,11 +132,12 @@ describe('FeishuChannel', () => {
     sdkRef.userGet = vi
       .fn()
       .mockResolvedValue({ data: { user: { name: 'Test User' } } });
-    sdkRef.botInfoGet = vi
-      .fn()
-      .mockResolvedValue({ data: { bot: { open_id: 'ou_bot123' } } });
+    sdkRef.getTenantAccessToken = vi.fn().mockResolvedValue('test-token');
     sdkRef.wsStart = vi.fn().mockResolvedValue(undefined);
     sdkRef.eventHandlers = null;
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      json: async () => ({ bot: { open_id: 'ou_bot123' } }),
+    } as any);
   });
 
   afterEach(() => {
@@ -202,7 +202,7 @@ describe('FeishuChannel', () => {
 
       expect(channel.isConnected()).toBe(true);
       expect(sdkRef.wsStart).toHaveBeenCalled();
-      expect(sdkRef.botInfoGet).toHaveBeenCalled();
+      expect(sdkRef.getTenantAccessToken).toHaveBeenCalled();
     });
 
     it('disconnect() sets connected to false', async () => {
@@ -215,7 +215,7 @@ describe('FeishuChannel', () => {
     });
 
     it('connect() succeeds even when bot info fetch fails', async () => {
-      sdkRef.botInfoGet.mockRejectedValueOnce(new Error('API error'));
+      vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('API error'));
 
       const channel = new FeishuChannel('id', 'secret', createTestOpts());
       await channel.connect();
